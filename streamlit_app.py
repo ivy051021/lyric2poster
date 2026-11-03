@@ -6,10 +6,12 @@ and nothing in this file writes them to disk, a log or a database.
 """
 from __future__ import annotations
 
+import io
 import logging
 import random
 
 import streamlit as st
+from PIL import Image
 
 from lyric2poster.art_director import BriefError, build_art_director
 from lyric2poster.charts import load_charts
@@ -32,6 +34,37 @@ def _secrets():
         return st.secrets
     except Exception:  # noqa: BLE001 - no secrets file when running locally
         return None
+
+
+def export_poster(image: Image.Image, export_type: str) -> tuple[bytes, str, str]:
+    """Resizes and formats the generated poster image based on aspect ratio/export selection."""
+    buffer = io.BytesIO()
+
+    if export_type == "instagram_story":
+        # 9:16 Aspect Ratio (1080 x 1920)
+        target_w, target_h = 1080, 1920
+        out_img = image.resize((target_w, target_h), Image.Resampling.LANCZOS)
+        out_img.save(buffer, format="PNG")
+        mime_type = "image/png"
+        file_ext = "png"
+
+    elif export_type == "print_pdf":
+        # A4 @ 300 DPI (2480 x 3508 px)
+        target_w, target_h = 2480, 3508
+        out_img = image.resize((target_w, target_h), Image.Resampling.LANCZOS)
+        if out_img.mode != "RGB":
+            out_img = out_img.convert("RGB")
+        out_img.save(buffer, format="PDF", resolution=300.0)
+        mime_type = "application/pdf"
+        file_ext = "pdf"
+
+    else:  # Default PNG
+        image.save(buffer, format="PNG")
+        mime_type = "image/png"
+        file_ext = "png"
+
+    buffer.seek(0)
+    return buffer.getvalue(), mime_type, file_ext
 
 
 settings = load_settings(secrets=_secrets())
@@ -154,22 +187,55 @@ if "brief" in st.session_state:
     else:
         if needs_softening(brief):
             st.info("This song touches sensitive themes, so the poster will treat them abstractly.")
+        
+        # Style selection
         style = st.selectbox("Style", STYLE_PRESETS, index=STYLE_PRESETS.index(brief.style_preset))
+        
+        # Aspect Ratio / Export Format Selection (Added under Style)
+        aspect_ratio = st.selectbox(
+            "Aspect Ratio / Format",
+            options=[
+                "Standard Square (PNG)",
+                "Instagram Story (9:16 PNG)",
+                "High-Res Print (A4 PDF)"
+            ]
+        )
+        ratio_map = {
+            "Standard Square (PNG)": "default",
+            "Instagram Story (9:16 PNG)": "instagram_story",
+            "High-Res Print (A4 PDF)": "print_pdf"
+        }
 
         def make_poster() -> None:
             if not limiter.take("posters"):
                 st.session_state["error"] = "You have used all your posters for this session."
                 return
-            req = ImageRequest(prompt=build_image_prompt(brief, style), palette=brief.palette,
-                               seed=random.randint(0, 2**31 - 1))
+            req = ImageRequest(
+                prompt=build_image_prompt(brief, style), 
+                palette=brief.palette,
+                seed=random.randint(0, 2**31 - 1)
+            )
             try:
                 result, fell_back, note = generate_with_fallback(engine, req)
             except EngineError as exc:
                 st.session_state["error"] = str(exc)
                 return
+            
+            # Apply title overlay
+            final_img = add_title_overlay(result.png, title, artist)
+            
+            # Process aspect ratio / format selection
+            export_key = ratio_map[aspect_ratio]
+            file_bytes, mime, ext = export_poster(final_img, export_key)
+
             st.session_state["poster"] = {
-                "png": add_title_overlay(result.png, title, artist),
-                "engine": result.engine, "model": result.model, "fell_back": fell_back, "note": note,
+                "bytes": file_bytes,
+                "mime": mime,
+                "ext": ext,
+                "engine": result.engine, 
+                "model": result.model, 
+                "fell_back": fell_back, 
+                "note": note,
             }
 
         st.button("2. Make the poster", on_click=make_poster)
@@ -178,98 +244,7 @@ if "poster" in st.session_state:
     poster = st.session_state["poster"]
     if poster["fell_back"]:
         st.warning(f"The image engine failed, so this is the offline demo poster. ({poster['note']})")
-    st.image(poster["png"], caption=f"{poster['engine']} / {poster['model']}")
-    st.download_button("Download PNG", poster["png"], file_name="poster.png", mime="image/png")
+    
+    st.image(poster["bytes"], caption=f"{poster['engine']} / {poster['model']}")
+    st.download_button("Download Poster", poster["bytes"], file_name=f"poster.{poster['ext']}", mime=poster["mime"])
     st.caption("AI-generated image. Title and artist were added as text afterwards.")
-    import io
-import streamlit as st
-from PIL import Image
-
-def export_poster(image: Image.Image, export_type: str) -> tuple[bytes, str, str]:
-    """
-    Resizes and formats the generated poster image based on user selection.
-    Returns (bytes_data, mime_type, file_extension).
-    """
-    buffer = io.BytesIO()
-    
-    if export_type == "instagram_story":
-        # 9:16 Aspect Ratio (1080 x 1920)
-        target_w, target_h = 1080, 1920
-        out_img = image.resize((target_w, target_h), Image.Resampling.LANCZOS)
-        out_img.save(buffer, format="PNG")
-        mime_type = "image/png"
-        file_ext = "png"
-
-    elif export_type == "print_pdf":
-        # A4 @ 300 DPI (2480 x 3508 px)
-        target_w, target_h = 2480, 3508
-        out_img = image.resize((target_w, target_h), Image.Resampling.LANCZOS)
-        if out_img.mode != "RGB":
-            out_img = out_img.convert("RGB")
-        out_img.save(buffer, format="PDF", resolution=300.0)
-        mime_type = "application/pdf"
-        file_ext = "pdf"
-
-    else:  # Default PNG
-        image.save(buffer, format="PNG")
-        mime_type = "image/png"
-        file_ext = "png"
-
-    buffer.seek(0)
-    return buffer.getvalue(), mime_type, file_ext
-
-
-# -------------------------------------------------------------------
-# Streamlit UI Configuration
-# -------------------------------------------------------------------
-st.set_page_config(page_title="Lyric2Poster", page_icon="🎨", layout="centered")
-
-st.title("🎨 Lyric2Poster Generator")
-st.subheader("Transform your favorite lyrics into stunning visual posters")
-
-# Input Section
-song_title = st.text_input("Song Title", placeholder="e.g. Hotel California")
-artist_name = st.text_input("Artist Name", placeholder="e.g. Eagles")
-lyrics_input = st.text_area("Lyrics / Key Lines", placeholder="Paste your lyrics here...")
-
-if st.button("Generate Poster"):
-    if not lyrics_input:
-        st.warning("Please enter some lyrics to generate a poster.")
-    else:
-        with st.spinner("Creating your poster..."):
-            # Put your existing image & text generation logic here
-            # For demonstration, creating a placeholder image:
-            generated_img = Image.new("RGB", (1000, 1000), color=(30, 30, 30))
-            st.session_state["generated_poster"] = generated_img
-            st.success("Poster generated successfully!")
-
-# Export / Download Section
-if "generated_poster" in st.session_state:
-    st.divider()
-    st.markdown("### 📥 Export & Download Poster")
-    
-    export_format = st.selectbox(
-        "Select Format",
-        options=[
-            "Standard Image (PNG)",
-            "Instagram Story (9:16 PNG)",
-            "High-Res Print (A4 PDF)"
-        ]
-    )
-    
-    format_map = {
-        "Standard Image (PNG)": "default",
-        "Instagram Story (9:16 PNG)": "instagram_story",
-        "High-Res Print (A4 PDF)": "print_pdf"
-    }
-
-    selected_key = format_map[export_format]
-    file_bytes, mime, ext = export_poster(st.session_state["generated_poster"], selected_key)
-    
-    st.download_button(
-        label=f"Download {export_format}",
-        data=file_bytes,
-        file_name=f"lyric_poster.{ext}",
-        mime=mime,
-        use_container_width=True
-    )
