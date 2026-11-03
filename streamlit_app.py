@@ -221,6 +221,31 @@ if "brief" in st.session_state:
                 st.session_state["error"] = str(exc)
                 return
             
+            # Apply title overlay (returns raw bytes)
+            raw_overlay_bytes = add_title_overlay(result.png, title, artist)
+            
+            # Convert bytes to PIL Image object before calling export_poster
+            final_pil_img = Image.open(io.BytesIO(raw_overlay_bytes))
+            
+            # Process aspect ratio / format selection
+            export_key = ratio_map[aspect_ratio]
+            file_bytes, mime, ext = export_poster(final_pil_img, export_key)
+
+            st.session_state["poster"] = {
+                "bytes": file_bytes,
+                "mime": mime,
+                "ext": ext,
+                "engine": result.engine, 
+                "model": result.model, 
+                "fell_back": fell_back, 
+                "note": note,
+            }
+            try:
+                result, fell_back, note = generate_with_fallback(engine, req)
+            except EngineError as exc:
+                st.session_state["error"] = str(exc)
+                return
+            
             # Apply title overlay
             final_img = add_title_overlay(result.png, title, artist)
             
